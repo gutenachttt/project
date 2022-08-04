@@ -1,0 +1,238 @@
+---
+title: "財務時間序列  期末Project -- 比特幣交易策略"
+subtitle: "統計碩二 R09H41017 吳于瑄"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+<br />
+*Bitcoin price data source：https://www.binance.com/zh-TW*
+<br />
+<br />
+**投資策略說明：**  
+
+1. 讀取幣安API，並畫出K線圖觀察比特幣價格     
+2. 將每月1號設為判斷是否進場的時間點，起始時間為2020/1/1  
+3. 若收盤價大於移動平均(MA)，則進場  
+4. 比較不同移動平均(MA5.20.60.120)與不同Lag天數(1~5天)情況下，何種報酬率較佳  
+5. 繪製最終選擇出來的最佳策略之累積報酬圖，並與「於期初購買後就Hold到底」的策略進行比較    
+<br />
+
+```{r}
+
+# 載入套件
+library(quantmod) # 畫K線
+library(rvest)
+library(magrittr)
+library(jsonlite) # 讀取API
+library(dplyr)
+library(lubridate)
+library(xts)
+library(TTR)
+library(zoo)
+library(ggplot2)
+library(PerformanceAnalytics)
+
+```
+
+```{r}
+# 讀取幣安API 取得BTC價格
+aqi_url <- "https://api.binance.com/api/v1/klines?symbol=BTCUSDT&interval=1d&limit=1000"
+BTC_PRICE <- fromJSON(aqi_url) %>%
+  as.data.frame() %>%
+  select(1:6) %>%
+  mutate(V1 = as.numeric(V1)/1000) %>%
+  mutate(V1 = as.Date(as.POSIXct(V1, origin="1970-01-01 00:00:00"))) %>%  # 轉換日期格式
+  mutate(V2 = as.numeric(V2),
+         V3 = as.numeric(V3),
+         V4 = as.numeric(V4),
+         V5 = as.numeric(V5),
+         V6 = as.numeric(V6)) %>%
+  mutate(ma5 = SMA(V5,5),   # 計算移動平均
+         ma20 = SMA(V5,20),
+         ma60 = SMA(V5,60),
+         ma120 = SMA(V5,120))
+
+colnames(BTC_PRICE) <- c("Date", "Open", "High", "Low", "Close","Volume","MA5","MA20","MA60","MA120")
+
+head(BTC_PRICE,10)
+```
+
+
+```{r}
+# 用quantmod畫K線
+start <- which(BTC_PRICE$Date == "2020-01-01")
+BTC_xts <-as.xts(read.zoo(BTC_PRICE[start:1000,]))
+ma_5 <- runMean(BTC_xts$Close,n = 5)  # 用SMA也可以
+ma_20 <- runMean(BTC_xts$Close,n = 20) 
+ma_60 <- runMean(BTC_xts$Close,n = 60)
+ma_120 <- runMean(BTC_xts$Close,n = 120)
+chartSeries(BTC_xts)
+addTA(ma_5,on = 1,col = "green")
+addTA(ma_20,on = 1,col = "red")
+addTA(ma_60,on = 1,col = "purple")
+addTA(ma_120,on = 1,col = "blue")
+
+
+invest_date <- c("2020-01-01","2020-02-01","2020-03-01","2020-04-01","2020-05-01",
+                 "2020-06-01","2020-07-01","2020-08-01","2020-09-01","2020-10-01",
+                 "2020-11-01","2020-12-01","2021-01-01","2021-02-01","2021-03-01",
+                 "2021-04-01","2021-05-01","2021-06-01")
+
+```
+
+```{r}
+# 建立空的資料表來放入計算後的結果
+return <- data.frame(
+  Lag_day = integer(),
+  MA5 = double(),
+  MA20 = double(),
+  MA60 = double(),
+  MA120 = double(),
+  invest_date = character(),
+  stringsAsFactors = FALSE)
+```
+
+```{r}
+# 計算不同策略的最終報酬
+for(i in 1:18)
+{
+  invest_date_A <- invest_date[i]
+  start <- which(BTC_PRICE$Date == invest_date_A)
+  BTC_xts_A <-as.xts(read.zoo(BTC_PRICE[start:1000,]))
+for(i in 1:4) {
+  for(j in 1:5){
+      sig <- ifelse(BTC_xts_A[,4] > BTC_xts_A[,i+5],1,0)  # if收盤價>MA 則為1 
+      sig <- stats::lag(sig,j)
+      roc <- ROC(type = "discrete",BTC_xts[,4])  # 每日漲跌幅
+      ret <- roc * sig
+      ret_calculate <- cumprod(1+na.omit(ret))["2021-12-31"]  # 期末累積報酬
+      return[j,i+1] <- ret_calculate[,1][[1]]-1
+      return[j,1] <- j
+      return[j,6] <- invest_date_A
+  }
+}
+  return <- rbind(return,return)
+}
+
+```
+
+
+```{r}
+# 將重複的資料刪除
+return_final <- return %>%
+  distinct(Lag_day,MA5,MA20,MA60,MA120,invest_date, .keep_all = TRUE) %>%
+  arrange(invest_date)
+
+head(return_final,10)
+```
+<br />
+<br />
+**比較不同移動平均(MA5.MA20.MA60.MA120)報酬率**
+<br />
+```{r}
+# 看哪個MA策略好
+return_average <- c(mean(return_final$MA5),mean(return_final$MA20),mean(return_final$MA60),mean(return_final$MA120))
+return_median <- c(median(return_final$MA5),median(return_final$MA20),median(return_final$MA60),median(return_final$MA120))
+
+return_calulate_byMA <- rbind(return_average,return_median)
+colnames(return_calulate_byMA) <- c("MA5", "MA20", "MA60", "MA120")
+return_calulate_byMA  # 不同MA平均與中位數報酬率
+```
+<br />
+**MA60不管是平均數(3.18倍)還是中位數(3.74倍)，報酬率都比其他高，故選定 MA60 為投資策略。**
+<br />
+<br />
+<br />
+<br />
+**比較不同Lag天數(1~5天)報酬率**
+<br />
+```{r}
+# 看訊號出來後Lag幾天執行較好
+return_average_1 <- c(mean(return_final$MA5[which(return_final$Lag_day == 1)])
+                    ,mean(return_final$MA20[which(return_final$Lag_day == 1)])
+                    ,mean(return_final$MA60[which(return_final$Lag_day == 1)])
+                    ,mean(return_final$MA120[which(return_final$Lag_day == 1)]))
+return_average_2 <- c(mean(return_final$MA5[which(return_final$Lag_day == 2)])
+                      ,mean(return_final$MA20[which(return_final$Lag_day == 2)])
+                      ,mean(return_final$MA60[which(return_final$Lag_day == 2)])
+                      ,mean(return_final$MA120[which(return_final$Lag_day == 2)]))
+return_average_3 <- c(mean(return_final$MA5[which(return_final$Lag_day == 3)])
+                      ,mean(return_final$MA20[which(return_final$Lag_day == 3)])
+                      ,mean(return_final$MA60[which(return_final$Lag_day == 3)])
+                      ,mean(return_final$MA120[which(return_final$Lag_day == 3)]))
+return_average_4 <- c(mean(return_final$MA5[which(return_final$Lag_day == 4)])
+                      ,mean(return_final$MA20[which(return_final$Lag_day == 4)])
+                      ,mean(return_final$MA60[which(return_final$Lag_day == 4)])
+                      ,mean(return_final$MA120[which(return_final$Lag_day == 4)]))
+return_average_5 <- c(mean(return_final$MA5[which(return_final$Lag_day == 5)])
+                      ,mean(return_final$MA20[which(return_final$Lag_day == 5)])
+                      ,mean(return_final$MA60[which(return_final$Lag_day == 5)])
+                      ,mean(return_final$MA120[which(return_final$Lag_day == 5)]))
+
+return_median_1 <- c(median(return_final$MA5[which(return_final$Lag_day == 1)])
+                      ,median(return_final$MA20[which(return_final$Lag_day == 1)])
+                      ,median(return_final$MA60[which(return_final$Lag_day == 1)])
+                      ,median(return_final$MA120[which(return_final$Lag_day == 1)]))
+return_median_2 <- c(median(return_final$MA5[which(return_final$Lag_day == 2)])
+                      ,median(return_final$MA20[which(return_final$Lag_day == 2)])
+                      ,median(return_final$MA60[which(return_final$Lag_day == 2)])
+                      ,median(return_final$MA120[which(return_final$Lag_day == 2)]))
+return_median_3 <- c(median(return_final$MA5[which(return_final$Lag_day == 3)])
+                      ,median(return_final$MA20[which(return_final$Lag_day == 3)])
+                      ,median(return_final$MA60[which(return_final$Lag_day == 3)])
+                      ,median(return_final$MA120[which(return_final$Lag_day == 3)]))
+return_median_4 <- c(median(return_final$MA5[which(return_final$Lag_day == 4)])
+                      ,median(return_final$MA20[which(return_final$Lag_day == 4)])
+                      ,median(return_final$MA60[which(return_final$Lag_day == 4)])
+                      ,median(return_final$MA120[which(return_final$Lag_day == 4)]))
+return_median_5 <- c(median(return_final$MA5[which(return_final$Lag_day == 5)])
+                      ,median(return_final$MA20[which(return_final$Lag_day == 5)])
+                      ,median(return_final$MA60[which(return_final$Lag_day == 5)])
+                      ,median(return_final$MA120[which(return_final$Lag_day == 5)]))
+
+return_average_by_lagday <- rbind(return_average_1,return_average_2,return_average_3,return_average_4,return_average_5)
+rownames(return_average_by_lagday) <- c("Lag1", "Lag2", "Lag3", "Lag4", "Lag5")
+colnames(return_average_by_lagday) <- c("MA5", "MA20", "MA60", "MA120")
+return_average_by_lagday  # 不同Lag天數平均報酬率
+
+return_median_by_lagday <- rbind(return_median_1,return_median_2,return_median_3,return_median_4,return_median_5)
+rownames(return_median_by_lagday) <- c("Lag1", "Lag2", "Lag3", "Lag4", "Lag5")
+colnames(return_median_by_lagday) <- c("MA5", "MA20", "MA60", "MA120")
+return_median_by_lagday  # 不同Lag天數中位數報酬率
+
+```
+<br />
+**選定MA60策略下，不管是平均數(3.84倍)還是中位數(4.57倍)，報酬率都比其他高，故選定 Lag2天為投資策略。**
+<br />
+<br />
+<br />
+<br />
+**最後選定MA60且Lag2天作為最終交易策略，以下為累積報酬圖。**
+```{r}
+# 選定MA60且Lag2天執行交易策略 檢視累積報酬
+
+sig <- ifelse(BTC_xts$Close > BTC_xts$MA60,1,0)
+sig <- stats::lag(sig,2)
+roc <- ROC(type = "discrete",BTC_xts$Close)
+ret <- roc * sig
+compare <- cbind(ret,roc)
+colnames(compare) <- c("Strategy", "BTC")
+charts.PerformanceSummary(compare)
+```
+<br />
+<br />
+**結論：**
+<br />
+**若選定MA60且Lag2天執行交易策略，於2020/1/1開始投資，累積報酬率可將近800%(黑線)**  
+**若是於期初購買後就Hold到底，報酬率約為500%(紅線)**  
+**故以MA60且Lag天數2天作為交易策略，較佳**  
+<br />
+<br />
+<br />
+<br />
+<br />
+
+
